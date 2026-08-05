@@ -12,5 +12,5 @@ Find the script output log file in CSV format that shows the result of the opera
 
 Looking for more in-depth reporting? [AdminDroid Microsoft 365 reporting tool](https://admindroid.com/?src=GitHub) offers an extensive collection of 3,500+ out-of-the-box reports and dashboards. It’s the perfect complement to your PowerShell scripts.
 
-*View more comprehensive audit reports through AdminDroid:* [*https://demo.admindroid.com/#/M365/1/1/reports/29801/1/20?nodeId=3439*](http://localhost:8080/#/M365/1/1/reports/29801/1/20?nodeId=3439)
+*View more comprehensive audit reports through AdminDroid:* [*https://demo.admindroid.com/#/M365/1/1/reports/29801/1/20?nodeId=3439*](https://demo.admindroid.com/#/M365/1/1/reports/29801/1/20)
 
