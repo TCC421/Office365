@@ -2,12 +2,12 @@
 =============================================================================================
 Name:          Export Conditional Access Policies to Excel using PowerShell  
 Description:   The script exports all Conditional Access policies to an Excel file. 
-Version:       2.2
+Version:       3.0
 Website:       o365reports.com
 
 Script Highlights: 
 ~~~~~~~~~~~~~~~~~  
-1. The script generates 6 reports with 33 attributes for detailed CA policy analysis. 
+1. The script generates 6 reports with 45+ attributes for detailed CA policy analysis.
 2. The script exports all Conditional Access policies by default. 
 3. It generates report on active CA policies. 
 4. Finds all disabled CA policies. 
@@ -16,11 +16,11 @@ Script Highlights:
 7. Lists recently modified CA policies for tracking changes. 
 8. The script can be executed with MFA-enabled accounts. 
 9. It exports reports to CSV format. 
-10. The script automatically installs the required Microsoft Graph Beta PowerShell module upon user confirmation. 
+10. The script automatically installs the required Microsoft Graph PowerShell module upon user confirmation.
 11. Supports certificate-based authentication for secure access. 
 12. Includes scheduler-friendly functionality for automated reporting. 
 
-For detailed Script execution: https://o365reports.com/2024/02/20/export-conditional-access-policies-to-excel-using-powershell
+For detailed Script execution: https://o365reports.com/export-conditional-access-policies-to-excel-using-powershell
 
 
 Change Log:
@@ -29,6 +29,10 @@ Change Log:
   V2.0 (Feb 27, 2024) - Some CA policies doesn't have creation time. Error handling added for those CA policies.
   V2.1 (Aug 09, 2024) - Error handling added when the script tries to convert a deleted object ID into a name.
   V2.2 (Apr 01, 2025) - Fixed error while converting directory objects to names.
+  V3.0 (Sep 03, 2026) - Migrated from the Microsoft Graph Beta module to Microsoft Graph v1.0.
+                        Added 14 columns covering authentication flows, insider risk, token protection, Global Secure
+                        Access, device/application/service principal filters, workload identities and authentication
+                        context. Authentication context was previously read but never exported.
 ============================================================================================
 #>
 
@@ -50,22 +54,23 @@ Param
 $global:DirectoryObjsHash = @{}
 $global:ServicePrincipalsHash=@{}
 $global:NamedLocationHash=@{}
+$global:BetaSessionControlsHash=@{}
 Function Connect_MgGraph
 {
- $MsGraphBetaModule =  Get-Module Microsoft.Graph.Beta -ListAvailable
- if($MsGraphBetaModule -eq $null)
+ $MsGraphModule =  Get-Module Microsoft.Graph -ListAvailable
+ if($MsGraphModule -eq $null)
  { 
-    Write-host "Important: Microsoft Graph Beta module is unavailable. It is mandatory to have this module installed in the system to run the script successfully." 
-    $confirm = Read-Host Are you sure you want to install Microsoft Graph Beta module? [Y] Yes [N] No  
+    Write-host "Important: Microsoft Graph module is unavailable. It is mandatory to have this module installed in the system to run the script successfully." 
+    $confirm = Read-Host Are you sure you want to install Microsoft Graph module? [Y] Yes [N] No  
     if($confirm -match "[yY]") 
     { 
-        Write-host "Installing Microsoft Graph Beta module..."
-        Install-Module Microsoft.Graph.Beta -Scope CurrentUser -AllowClobber
-        Write-host "Microsoft Graph Beta module is installed in the machine successfully" -ForegroundColor Magenta 
+        Write-host "Installing Microsoft Graph module..."
+        Install-Module Microsoft.Graph -Scope CurrentUser -AllowClobber
+        Write-host "Microsoft Graph module is installed in the machine successfully" -ForegroundColor Magenta
     } 
     else
     { 
-        Write-host "Exiting. `nNote: Microsoft Graph Beta module must be available in your system to run the script" -ForegroundColor Red
+        Write-host "Exiting. `nNote: Microsoft Graph module must be available in your system to run the script" -ForegroundColor Red
         Exit 
     } 
  }
@@ -74,7 +79,7 @@ Function Connect_MgGraph
  {
   Disconnect-MgGraph
  }
- #Connecting to MgGraph beta
+ #Connecting to MgGraph
  Write-Host Connecting to Microsoft Graph...
  if(($TenantId -ne "") -and ($ClientId -ne "") -and ($CertificateThumbprint -ne ""))  
  {  
@@ -109,7 +114,7 @@ Function ConvertTo-Name {
         else{
          try
          {
-          $Name = ((Get-MgBetaDirectoryObject -DirectoryObjectId $Id ).AdditionalProperties["displayName"] )
+          $Name = ((Get-MgDirectoryObject -DirectoryObjectId $Id ).AdditionalProperties["displayName"] )
           if($Name -ne $null)
           {
            $DirectoryObjsHash[$Id]=$Name
@@ -176,14 +181,33 @@ $ProcessedCount=0
 $OutputCount=0
 #Get all service principals
 Write-Progress -Activity "`n     Retrieving service principals..."
-$ServicePrincipalsHash=Get-MgBetaServicePrincipal -All | Group-Object -Property AppId -AsHashTable
+$ServicePrincipalsHash=Get-MgServicePrincipal -All | Group-Object -Property AppId -AsHashTable
 Write-Progress -Activity "`n     Retrieving named location..."
-$NamedLocationHash=$namedLocations = Get-MgBetaIdentityConditionalAccessNamedLocation -All | Group-Object -Property Id -AsHashTable
+$NamedLocationHash=$namedLocations = Get-MgIdentityConditionalAccessNamedLocation -All | Group-Object -Property Id -AsHashTable
+#CAE, token protection and Global Secure Access are exposed only in the beta endpoint
+Write-Progress -Activity "`n     Retrieving beta session controls..."
+$BetaUri='https://graph.microsoft.com/beta/identity/conditionalAccess/policies?$select=id,sessionControls'
+try
+{
+ while($BetaUri -ne $null)
+ {
+  $BetaResponse=Invoke-MgGraphRequest -Method GET -Uri $BetaUri -OutputType PSObject
+  foreach($BetaPolicy in $BetaResponse.value)
+  {
+   $BetaSessionControlsHash[$BetaPolicy.id]=$BetaPolicy.sessionControls
+  }
+  $BetaUri=$BetaResponse.'@odata.nextLink'
+ }
+}
+catch
+{
+ Write-Host "Unable to retrieve beta session controls. The CAE Mode, Token Protection and GSA Filtering Profile columns will be empty." -ForegroundColor Yellow
+}
 Write-Host "Exporting CA policies report..." -ForegroundColor Cyan
 
 
 #Processing all CA polcies
-Get-MgBetaIdentityConditionalAccessPolicy -All | Foreach {
+Get-MgIdentityConditionalAccessPolicy -All | Foreach {
  $ProcessedCount++
  $CAName=$_.DisplayName
  $Description=$_.Description
@@ -284,15 +308,34 @@ Get-MgBetaIdentityConditionalAccessPolicy -All | Foreach {
  
  $IncludeGuestsOrExtUsers=$IncludeGuestsOrExtUsers -join ","
  $ExcludeGuestsOrExtUsers=$ExcludeGuestsOrExtUsers -join ","
+
+ #Workload identities
+ $IncludeServicePrincipals=$Conditions.ClientApplications.IncludeServicePrincipals
+ $ExcludeServicePrincipals=$Conditions.ClientApplications.ExcludeServicePrincipals
+ $ServicePrincipalFilterMode=$Conditions.ClientApplications.ServicePrincipalFilter.Mode
+ $ServicePrincipalFilterRule=$Conditions.ClientApplications.ServicePrincipalFilter.Rule
+
+ if($IncludeServicePrincipals.Count -ne 0 -and ($IncludeServicePrincipals -ne 'ServicePrincipalsInMyTenant' -and $IncludeServicePrincipals -ne 'None'))
+ {
+  $IncludeServicePrincipals=ConvertTo-Name -InputIds $IncludeServicePrincipals
+ }
+ $IncludeServicePrincipals=$IncludeServicePrincipals -join ","
+ if($ExcludeServicePrincipals.Count -ne 0)
+ {
+  $ExcludeServicePrincipals=ConvertTo-Name -InputIds $ExcludeServicePrincipals
+ }
+ $ExcludeServicePrincipals=$ExcludeServicePrincipals -join ","
  
 
 
  #Target Resources
  $IncludeApplications=$_.Conditions.Applications.IncludeApplications
  $ExcludeApplications=$_.Conditions.Applications.ExcludeApplications
- $AuthContext=$_.Conditions.Applications.IncludeAuthenticationContextClassReferences
+ $AuthContext=$_.Conditions.Applications.IncludeAuthenticationContextClassReferences -join ","
  $UserAction=$_.Conditions.Applications.IncludeUserActions
  $UserAction=$UserAction -join ","
+ $AppFilterMode=$_.Conditions.Applications.ApplicationFilter.Mode
+ $AppFilterRule=$_.Conditions.Applications.ApplicationFilter.Rule
  
  #Convert id to names for Target resource properties
  if($IncludeApplications.Count -ne 0 -and ($IncludeApplications -ne 'All' -and $IncludeApplications -ne 'None' ))
@@ -311,6 +354,11 @@ Get-MgBetaIdentityConditionalAccessPolicy -All | Foreach {
  #Conditions
  $UserRisk=$_.Conditions.UserRiskLevels
  $SigninRisk=$_.Conditions.SignInRiskLevels
+ $ServicePrincipalRisk=$_.Conditions.ServicePrincipalRiskLevels -join ","
+ $InsiderRisk=$_.Conditions.InsiderRiskLevels
+ $AuthenticationFlows=$_.Conditions.AuthenticationFlows.TransferMethods
+ $DeviceFilterMode=$_.Conditions.Devices.DeviceFilter.Mode
+ $DeviceFilterRule=$_.Conditions.Devices.DeviceFilter.Rule
  $ClientApps=$_.Conditions.ClientAppTypes
  $IncludeDevicePlatform=$_.Conditions.Platforms.IncludePlatforms
  $ExcludeDevicePlatform=$_.Conditions.Platforms.ExcludePlatforms
@@ -347,7 +395,10 @@ Get-MgBetaIdentityConditionalAccessPolicy -All | Foreach {
  #Session Control
  $AppEnforcedRestrictions=$_.SessionControls.ApplicationEnforcedRestrictions.IsEnabled
  $CloudAppSecurity=$_.SessionControls.CloudAppSecurity.IsEnabled
- $CAEMode=$_.SessionControls.ContinuousAccessEvaluation.Mode
+ $BetaSessionControls=$BetaSessionControlsHash[$_.Id]
+ $CAEMode=$BetaSessionControls.continuousAccessEvaluation.mode
+ $TokenProtection=$BetaSessionControls.secureSignInSession.isEnabled
+ $GSAFilteringProfile=$BetaSessionControls.globalSecureAccessFilteringProfile.profileId
  $DisableResilienceDefaults=$_.SessionControls.DisableResilienceDefaults
  $PersistentBrowser=$_.SessionControls.PersistentBrowser.Mode
  $IsSigninFrequencyEnabled=$_.SessionControls.SignInFrequency.IsEnabled
@@ -370,9 +421,21 @@ Get-MgBetaIdentityConditionalAccessPolicy -All | Foreach {
             'Exclude Guests or Ext Users'=$ExcludeGuestsOrExtUsers;
             'Include Applications'=$IncludeApplications;
             'Exclude Applications'=$ExcludeApplications;
+            'Application Filter Mode'=$AppFilterMode;
+            'Application Filter Rule'=$AppFilterRule;
+            'Include Service Principals'=$IncludeServicePrincipals;
+            'Exclude Service Principals'=$ExcludeServicePrincipals;
+            'Service Principal Filter Mode'=$ServicePrincipalFilterMode;
+            'Service Principal Filter Rule'=$ServicePrincipalFilterRule;
             'User Action'=$UserAction;
+            'Authentication Context'=$AuthContext;
             'User Risk'=$UserRisk;
             'Signin Risk'=$SigninRisk;
+            'Service Principal Risk'=$ServicePrincipalRisk;
+            'Insider Risk'=$InsiderRisk;
+            'Authentication Flows'=$AuthenticationFlows;
+            'Device Filter Mode'=$DeviceFilterMode;
+            'Device Filter Rule'=$DeviceFilterRule;
             'Client Apps'=$ClientApps;
             'Include Device Platform'=$IncludeDevicePlatform;
             'Exclude Device Platform'=$ExcludeDevicePlatform;
@@ -385,15 +448,19 @@ Get-MgBetaIdentityConditionalAccessPolicy -All | Foreach {
             'App Enforced Restrictions Enabled'=$AppEnforcedRestrictions;
             'Cloud App Security'=$CloudAppSecurity;
             'CAE Mode'=$CAEMode;
+            'Token Protection'=$TokenProtection;
+            'GSA Filtering Profile'=$GSAFilteringProfile;
             'Disable Resilience Defaults'=$DisableResilienceDefaults;
             'Is Signin Frequency Enabled'=$IsSigninFrequencyEnabled;
             'Signin Frequency Value'=$SignInFrequencyValue;
             'State'=$State}
   $Results= New-Object PSObject -Property $Result  
   $Results | Select-Object 'CA Policy Name','Description','Creation Time','Modified Time','State','Include Users','Exclude Users','Include Groups','Exclude Groups','Include Roles','Exclude Roles',
-  'Include Guests or Ext Users','Exclude Guests or Ext Users','Include Applications','Exclude Applications','User Action','User Risk','Signin Risk','Client Apps','Include Device Platform',
+  'Include Guests or Ext Users','Exclude Guests or Ext Users','Include Applications','Exclude Applications','Application Filter Mode','Application Filter Rule','Include Service Principals',
+  'Exclude Service Principals','Service Principal Filter Mode','Service Principal Filter Rule','User Action','Authentication Context','User Risk','Signin Risk','Service Principal Risk','Insider Risk',
+  'Authentication Flows','Device Filter Mode','Device Filter Rule','Client Apps','Include Device Platform',
   'Exclude Device Platform','Include Locations','Exclude Locations','Access Control','Access Control Operator','Authentication Strength','Auth Strength Allowed Combo',
-  'App Enforced Restrictions Enabled','Cloud App Security','CAE Mode','Disable Resilience Defaults','Is Signin Frequency Enabled','Signin Frequency Value'| Export-Csv -Path $ExportCSV -Notype -Append 
+  'App Enforced Restrictions Enabled','Cloud App Security','CAE Mode','Token Protection','GSA Filtering Profile','Disable Resilience Defaults','Is Signin Frequency Enabled','Signin Frequency Value'| Export-Csv -Path $ExportCSV -Notype -Append
  }
 
 
