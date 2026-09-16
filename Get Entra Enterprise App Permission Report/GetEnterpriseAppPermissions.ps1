@@ -1,7 +1,7 @@
 ﻿<#
 =============================================================================================
 Name:     Get All Enterprise Applications with Their Permissions       
-Version:  1.0       
+Version:  1.1       
 Website:  blog.admindroid.com       
 
 
@@ -33,6 +33,10 @@ Script Highlights:
 For detailed Script execution: https://blog.admindroid.com/export-all-enterprise-apps-and-their-assigned-permission-in-microsoft-entra/
 
 
+Change Log:
+~~~~~~~~~~
+  V1.0 (Oct 28, 2025) - File created
+  V1.1 (Sep 16, 2026) - Updated the required permission scope and fixed data retrieval and filtering issues.
 ============================================================================================
 #>
 
@@ -79,7 +83,7 @@ function Connect_MgGraph {
     }
 
     if ($CreateSession.IsPresent) {
-        Disconnect-MgGraph
+        Disconnect-MgGraph -ErrorAction SilentlyContinue
     }
 
     Write-Host "`nConnecting to Microsoft Graph..."
@@ -87,7 +91,7 @@ function Connect_MgGraph {
         Connect-MgGraph -TenantId $TenantId -AppId $ClientId -CertificateThumbprint $CertificateThumbPrint -NoWelcome
     }
     else {
-        Connect-MgGraph -Scopes "Application.Read.All" -NoWelcome
+        Connect-MgGraph -Scopes "Directory.Read.All" -NoWelcome
     }
 }
 
@@ -98,18 +102,20 @@ $TenantGUID= (Get-MgOrganization).Id
 Write-Host "`nRetreiving the Enterprise applications with admin consents and user consents"
 $AppCount = 0 
 $PrintCount = 0
+$SpCache = @{}
 
 Get-MgServicePrincipal -All | ForEach-Object {
-    $Print = 1
+    $AppPrint = 1
     $AppCount++
     $ServicePrincipalType = $_.ServicePrincipalType
     $AppName = $_.DisplayName
     Write-Progress -Activity "Processed Enterprise apps: $($AppCount) $($AppName)" 
     $AppId = $_.AppId
     $ObjId  = $_.Id
-    $CreatedDateTime = [datetime]@($_.AdditionalProperties.Values)[0]
+    $Created = $_.AdditionalProperties['createdDateTime']
+    $CreatedDateTime = if ($Created) { [datetime]::Parse([string]$Created, $null, [System.Globalization.DateTimeStyles]::RoundtripKind) } else { "-" }
     $AccountEnabled = if ($_.AccountEnabled) { "Enabled" } else { "Disabled" }
-    $Owners = (Get-MgServicePrincipalOwner -ServicePrincipalId $_.Id | ForEach-Object { $_.AdditionalProperties["displayName"] }) -join ", "
+    $Owners = (Get-MgServicePrincipalOwner -ServicePrincipalId $_.Id -All | ForEach-Object { $_.AdditionalProperties["displayName"] }) -join ", "
     $Tags = $_.Tags
     $IsRoleAssignmentRequired = $_.AppRoleAssignmentRequired
 
@@ -122,18 +128,18 @@ Get-MgServicePrincipal -All | ForEach-Object {
     if ($AppOwnerOrgId -eq $TenantGUID){ $AppOrg="Home tenant" }
     else { $AppOrg="External tenant" }
     
-    if (($ApplicationId.Length -ne 0) -and ($ApplicationId -ne $AppId)) { $Print = 0 }
-    if (($ApplicationName.Length -ne 0) -and ($ApplicationName -ne $AppName)) { $Print = 0 }
-    if (($ObjectId.Length -ne 0) -and ($ObjectId -ne $ObjId)) { $Print = 0 }
-    if ($UsersSignIn -eq "Enabled" -and $_.AccountEnabled -ne $true) { $Print = 0 }
-    if ($UsersSignIn -eq "Disabled" -and $_.AccountEnabled -ne $false) { $Print = 0 }
-    if (($AppVisibility -eq "VisibleApps") -and ($UserVisibility -ne "Visible")){ $Print=0 }
-    if (($AppVisibility -eq "HiddenApps") -and ($UserVisibility -ne "Hidden")){ $Print=0 }
-    if (($AccessScopeToAllUsers.IsPresent) -and ($AccessScope -eq "Only assigned users can access")){ $Print=0 }
-    if (($RoleAssignmentRequiredApps.IsPresent) -and ($AccessScope -eq "All users can access")){ $Print=0 }
-    if (($OwnerlessApps.IsPresent) -and ($Owners -ne "-")){ $Print=0 }
-    if ($AppOrigin -eq "HomeTenant" -and ($AppOrg -eq "External tenant")){ $Print=0 }
-    if ($AppOrigin -eq "ExternalTenant" -and ($AppOrg -eq "Home tenant")){ $Print=0 }
+    if (($ApplicationId.Length -ne 0) -and ($ApplicationId -ne $AppId)) { $AppPrint = 0 }
+    if (($ApplicationName.Length -ne 0) -and ($ApplicationName -ne $AppName)) { $AppPrint = 0 }
+    if (($ObjectId.Length -ne 0) -and ($ObjectId -ne $ObjId)) { $AppPrint = 0 }
+    if ($UsersSignIn -eq "Enabled" -and $_.AccountEnabled -ne $true) { $AppPrint = 0 }
+    if ($UsersSignIn -eq "Disabled" -and $_.AccountEnabled -ne $false) { $AppPrint = 0 }
+    if (($AppVisibility -eq "VisibleApps") -and ($UserVisibility -ne "Visible")){ $AppPrint=0 }
+    if (($AppVisibility -eq "HiddenApps") -and ($UserVisibility -ne "Hidden")){ $AppPrint=0 }
+    if (($AccessScopeToAllUsers.IsPresent) -and ($AccessScope -eq "Only assigned users can access")){ $AppPrint=0 }
+    if (($RoleAssignmentRequiredApps.IsPresent) -and ($AccessScope -eq "All users can access")){ $AppPrint=0 }
+    if (($OwnerlessApps.IsPresent) -and ($Owners -ne "-")){ $AppPrint=0 }
+    if ($AppOrigin -eq "HomeTenant" -and ($AppOrg -eq "External tenant")){ $AppPrint=0 }
+    if ($AppOrigin -eq "ExternalTenant" -and ($AppOrg -eq "Home tenant")){ $AppPrint=0 }
     
     $DelegatedGrants = Get-MgServicePrincipalOauth2PermissionGrant -ServicePrincipalId $ObjId -All 
     $AppAssignments  = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $ObjId -All
@@ -142,6 +148,7 @@ Get-MgServicePrincipal -All | ForEach-Object {
     if (-not $AllAPIids) { $AllAPIids = @('-') }  
 
     foreach ($ResourceId in $AllAPIids) {
+        $Print = $AppPrint
         if ($ResourceId -eq '-') {
             $ResourceName = '-'
             $AdminDelegated = '-'
@@ -149,7 +156,8 @@ Get-MgServicePrincipal -All | ForEach-Object {
             $AdminApps      = '-'
         }
         else {
-            $ResourceSp = Get-MgServicePrincipal -ServicePrincipalId $ResourceId
+            if (-not $SpCache.ContainsKey($ResourceId)) { $SpCache[$ResourceId] = Get-MgServicePrincipal -ServicePrincipalId $ResourceId }
+            $ResourceSp = $SpCache[$ResourceId]
             $ResourceName = $ResourceSp.DisplayName
 
             $AdminDelegated = $DelegatedGrants | Where-Object { $_.ResourceId -eq $ResourceId -and $_.ConsentType -eq "AllPrincipals" } | ForEach-Object{ $_.Scope.Trim()}
@@ -166,7 +174,7 @@ Get-MgServicePrincipal -All | ForEach-Object {
             $AdminApps = if(-not $AdminApps){"-"} else {$AdminApps -join ", "}
         }
        
-        if ((-not $IncludeAppsWithNoPermissions.IsPresent) -and ($AdminDelegated[0] -eq "-" -and $AdminApps[0] -eq "-" -and $UserDelegated[0] -eq "-")) { $Print = 0 }
+        if ((-not $IncludeAppsWithNoPermissions.IsPresent) -and ($AdminDelegated -eq "-" -and $AdminApps -eq "-" -and $UserDelegated -eq "-")) { $Print = 0 }
         if ($AdminConsentApplicationPermissions -and ((($AdminApps -split ", ") | Where-Object { $_ -in $AdminConsentApplicationPermissions }).Count -eq 0)) { $Print = 0 }
         if ($AdminConsentDelegatedPermissions -and ((($AdminDelegated -split ", ") | Where-Object { $_ -in $AdminConsentDelegatedPermissions}).Count -eq 0)) { $Print = 0 }
         if ($UserConsents -and ((($UserDelegated -split ", ") | Where-Object {$_ -in $UserConsents}).Count -eq 0)) { $Print = 0 }
@@ -217,5 +225,5 @@ if(((Test-Path -Path $ExportCSV) -eq "True"))
 }
 else
 {
-    Write-Host "No user found" -ForegroundColor Red
+    Write-Host "No records found" -ForegroundColor Red
 }
